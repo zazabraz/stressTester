@@ -19,10 +19,10 @@ func main() {
 	}()
 	rootLogger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	workers := flag.Int("wrk", 1, "number of concurrent workers")
+	workers := flag.Int("wrk", 10, "number of concurrent workers")
 	flag.Parse()
 
-	testerInst := tester.New(*rootLogger, *workers, quiz.New(*rootLogger))
+	testerInst := tester.New(*rootLogger, quiz.New(*rootLogger, *workers))
 
 	appInst := app.New(*rootLogger, testerInst)
 
