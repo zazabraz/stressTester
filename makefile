@@ -1,32 +1,18 @@
 # Name of the binary output
 BINARY_NAME=stressTester
 
-# Go build command
-BUILD_CMD=go build
-
-# List of platforms
-PLATFORMS=linux darwin windows
-
-# Default target
-.PHONY: all
-all: build
-
-# Target to build the project for all platforms
-.PHONY: build
-build: $(PLATFORMS)
-
 # Targets for specific platforms
 .PHONY: linux
 linux:
-	GOOS=linux GOARCH=amd64 $(BUILD_CMD) -o $(BINARY_NAME) main.go
+	GOOS=linux go build -o $(BINARY_NAME) main.go
 
 .PHONY: mac
 mac:
-	GOOS=darwin GOARCH=amd64 $(BUILD_CMD) -o $(BINARY_NAME) main.go
+	GOOS=darwin go build -o $(BINARY_NAME) main.go
 
 .PHONY: windows
 windows:
-	GOOS=windows GOARCH=amd64 $(BUILD_CMD) -o $(BINARY_NAME).exe main.go
+	GOOS=windows go build -o $(BINARY_NAME).exe main.go
 
 # Target to run the project with optional flags on Linux
 .PHONY: run-linux
