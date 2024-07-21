@@ -10,6 +10,10 @@ import (
 	"stress-tester/internal/infra/tester"
 )
 
+var (
+	workers = flag.Int("w", 10, "number of concurrent workers")
+)
+
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
@@ -19,7 +23,6 @@ func main() {
 	}()
 	rootLogger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	workers := flag.Int("wrk", 10, "number of concurrent workers")
 	flag.Parse()
 
 	testerInst := tester.New(*rootLogger, quiz.New(*rootLogger, *workers))

@@ -21,7 +21,10 @@ func (t *tester) Run(ctx context.Context) error {
 	t.log = *t.log.With("tester.Run")
 	err := t.wrk.TestWork(ctx)
 	if err != nil {
-		return fmt.Errorf("TestWork: %w", err)
+		t.log.Error("tester error",
+			slog.String("error", err.Error()),
+		)
+		return fmt.Errorf("tester: %w", err)
 	}
 	return nil
 }

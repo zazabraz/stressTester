@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -23,50 +22,32 @@ var (
 )
 
 type worker struct {
-	log            slog.Logger
-	client         *http.Client
-	cookies        []*http.Cookie
-	end            bool
-	questionNumber int
+	client      *http.Client
+	cookies     []*http.Cookie
+	end         bool
+	rateLimiter chan struct{}
 }
 
-func newWorker(log slog.Logger) *worker {
-	transport := &http.Transport{
-		MaxIdleConns:        100,
-		IdleConnTimeout:     30 * time.Second,
-		MaxIdleConnsPerHost: 100,
-	}
+func newWorker(rateLimiter chan struct{}) *worker {
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return nil
 		},
-		Transport: transport,
-		Timeout:   10 * time.Second,
+		Transport: &http.Transport{
+			IdleConnTimeout:     30 * time.Second,
+			MaxIdleConnsPerHost: 100,
+		},
+		Timeout: 10 * time.Second,
 	}
-	return &worker{log: log, client: client, questionNumber: 1}
-}
-
-func (w *worker) setCookies(reqUrl string) error {
-	resp, err := w.makeRequestWithCookies(http.MethodGet, reqUrl)
-	if err != nil {
-		return err
-	}
-
-	//read cookies from nestedResponse because of redirection
-	nestedResponse := resp.Request.Response
-	cookies := nestedResponse.Cookies()
-	w.cookies = cookies
-
-	return nil
+	return &worker{client: client, rateLimiter: rateLimiter}
 }
 
 func (w *worker) doWork(ctx context.Context) (string, error) {
 	var err error
-	//set cookie
+	// set cookie
 	for {
-		err := w.setCookies(quizUrl + "/start")
-		if errors.Is(ErrToManyRequests, err) {
-			time.Sleep(1 * time.Second)
+		err := w.setCookies(ctx, quizUrl+"/start")
+		if errors.Is(err, ErrToManyRequests) {
 			continue
 		}
 		if err != nil {
@@ -75,16 +56,16 @@ func (w *worker) doWork(ctx context.Context) (string, error) {
 		break
 	}
 
-	//get first question
+	question := 1
+	// get first question
 	var content []byte
 	for {
-		urlReq, err := url.JoinPath(quizUrl, "question", strconv.Itoa(w.questionNumber))
+		urlReq, err := url.JoinPath(quizUrl, "question", strconv.Itoa(question))
 		if err != nil {
 			return "", err
 		}
-		resp, err := w.makeRequestWithCookies(http.MethodGet, urlReq)
-		if errors.Is(ErrToManyRequests, err) {
-			time.Sleep(1 * time.Second)
+		resp, err := w.makeRequestWithCookies(ctx, http.MethodGet, urlReq)
+		if errors.Is(err, ErrToManyRequests) {
 			continue
 		}
 		if err != nil {
@@ -94,33 +75,37 @@ func (w *worker) doWork(ctx context.Context) (string, error) {
 
 		content, err = io.ReadAll(resp.Body)
 		if err != nil {
-			w.log.Error(fmt.Sprintf("error reading the response body: %s", err))
+			err := fmt.Errorf("error reading the response body: %s", err)
 			return "", err
 		}
 		break
 	}
 
 	for !w.end {
-		urlReq, err := url.JoinPath(quizUrl, "question", strconv.Itoa(w.questionNumber))
+		urlReq, err := url.JoinPath(quizUrl, "question", strconv.Itoa(question))
 		if err != nil {
 			return "", err
 		}
-		newContent, err := w.makeFillRequest(content, urlReq)
-		if errors.Is(ErrToManyRequests, err) {
-			time.Sleep(1 * time.Second)
+		newContent, err := w.makeFillRequest(ctx, content, urlReq)
+		if errors.Is(err, ErrToManyRequests) {
 			continue
 		}
 		if err != nil {
 			return "", err
 		}
 		content = newContent
+		question++
 	}
 
 	return string(content), err
 }
 
-func (w *worker) makeRequestWithCookies(method, reqUrl string) (*http.Response, error) {
-	req, err := http.NewRequest(method, reqUrl, nil)
+func (w *worker) makeRequestWithCookies(ctx context.Context, method, reqUrl string) (*http.Response, error) {
+	// acquire rate limiter token
+	w.rateLimiter <- struct{}{}
+	defer func() { <-w.rateLimiter }() // release rate limiter token
+
+	req, err := http.NewRequestWithContext(ctx, method, reqUrl, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -132,12 +117,27 @@ func (w *worker) makeRequestWithCookies(method, reqUrl string) (*http.Response, 
 		return nil, err
 	}
 	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		time.Sleep(1 * time.Second)
 		return nil, ErrToManyRequests
 	}
 	return resp, err
 }
 
-func (w *worker) makeFillRequest(htmlContent []byte, reqUrl string) ([]byte, error) {
+func (w *worker) setCookies(ctx context.Context, reqUrl string) error {
+	resp, err := w.makeRequestWithCookies(ctx, http.MethodGet, reqUrl)
+	if err != nil {
+		return err
+	}
+
+	// read cookies from nestedResponse because of redirection
+	nestedResponse := resp.Request.Response
+	cookies := nestedResponse.Cookies()
+	w.cookies = cookies
+
+	return nil
+}
+
+func (w *worker) makeFillRequest(ctx context.Context, htmlContent []byte, reqUrl string) ([]byte, error) {
 	formData, err := parseAndFillForm(htmlContent)
 	if err != nil {
 		err := fmt.Errorf("error parsing the HTML form: %s", err)
@@ -155,7 +155,7 @@ func (w *worker) makeFillRequest(htmlContent []byte, reqUrl string) ([]byte, err
 	}
 	urlWithQueries := reqUrl + "?" + parsedUrl.Encode()
 
-	resp, err := w.makeRequestWithCookies(http.MethodPost, urlWithQueries)
+	resp, err := w.makeRequestWithCookies(ctx, http.MethodPost, urlWithQueries)
 	if err != nil {
 		return nil, err
 	}
@@ -167,14 +167,14 @@ func (w *worker) makeFillRequest(htmlContent []byte, reqUrl string) ([]byte, err
 		return nil, err
 	}
 
-	hasError := hasErrorMessage(nextHtml)
+	hasError := w.hasErrorMessage(nextHtml)
 	if hasError {
 		err := fmt.Errorf("caught fill error")
 		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		nextQuestionNumber, err := nextNumber(nextHtml)
+		nextQuestionNumber, err := w.findQuestionNumber(nextHtml)
 		if err != nil {
 			err := fmt.Errorf("error parsing the next question number: %s", err)
 			return nil, err
@@ -182,16 +182,15 @@ func (w *worker) makeFillRequest(htmlContent []byte, reqUrl string) ([]byte, err
 		if nextQuestionNumber == 0 {
 			w.end = true
 		}
-		w.questionNumber = nextQuestionNumber
 
 		return nextHtml, err
 	} else {
-		err := fmt.Errorf("unhandled ststus code: %d", resp.StatusCode)
+		err := fmt.Errorf("unhandled status code: %d", resp.StatusCode)
 		return nil, err
 	}
 }
 
-func nextNumber(htmlContent []byte) (int, error) {
+func (w *worker) findQuestionNumber(htmlContent []byte) (int, error) {
 	re := regexp.MustCompile(`<title>Question (\d+) of \d+</title>`)
 	matches := re.FindSubmatch(htmlContent)
 	if matches == nil {
@@ -201,6 +200,6 @@ func nextNumber(htmlContent []byte) (int, error) {
 	return strconv.Atoi(string(currentQuestionNumber))
 }
 
-func hasErrorMessage(htmlContent []byte) bool {
+func (w *worker) hasErrorMessage(htmlContent []byte) bool {
 	return strings.Contains(string(htmlContent), `<h3>error:`)
 }

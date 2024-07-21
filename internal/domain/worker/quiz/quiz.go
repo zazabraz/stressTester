@@ -22,25 +22,25 @@ func (q *quiz) TestWork(ctx context.Context) error {
 	errCh := make(chan error)
 	workDone := make(chan struct{})
 
-	q.log.Info(fmt.Errorf("workers:%v", q.workersN).Error())
+	q.log.Info(fmt.Errorf("start testing quiz with %v workers", q.workersN).Error())
 	wg := sync.WaitGroup{}
+
+	rateLimiter := make(chan struct{}, 3)
+
 	for i := 1; i <= q.workersN; i++ {
 		wg.Add(1)
 		go func() {
-			wrk := newWorker(q.log)
+			wrk := newWorker(rateLimiter)
 			defer wg.Done()
 			start := time.Now()
 			res, err := wrk.doWork(ctx)
 			if err != nil {
 				errCh <- err
 			}
-			q.log.Info(
-				fmt.Sprintf(
-					"quiz worker %v ends with duration:%s final page: \n %s",
-					i,
-					time.Now().Sub(start),
-					res,
-				),
+			q.log.Info("Quiz worker ends",
+				slog.Int("worker", i),
+				slog.Duration("duration", time.Since(start)),
+				slog.String("final_page", res),
 			)
 		}()
 	}
@@ -55,7 +55,10 @@ func (q *quiz) TestWork(ctx context.Context) error {
 		case <-workDone:
 			return nil
 		case err := <-errCh:
-			q.log.Error(fmt.Errorf("tester err: %w", err).Error())
+			q.log.Error("quiz error",
+				slog.String("error", err.Error()),
+			)
+			return err
 		}
 	}
 
